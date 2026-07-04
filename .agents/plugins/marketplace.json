@@ -1,0 +1,20 @@
+{
+  "name": "codex-council-local",
+  "interface": {
+    "displayName": "Codex Council Local"
+  },
+  "plugins": [
+    {
+      "name": "codex-council",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-council"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

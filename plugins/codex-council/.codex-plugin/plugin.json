@@ -1,0 +1,28 @@
+{
+  "name": "codex-council",
+  "version": "0.1.0+codex.20260704180420",
+  "description": "Local Codex Council workflows with subagent roles and a durable MCP blackboard.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Council",
+    "shortDescription": "Run role-based Codex subagent councils over a local MCP blackboard.",
+    "longDescription": "Codex Council coordinates role-based subagents for review, design, and explicitly authorized implementation work. It stores durable local state in a SQLite-backed MCP blackboard and keeps large evidence in workspace artifacts.",
+    "developerName": "Local developer",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Run a standard council review of this project.",
+      "Use a council to design this change.",
+      "Implement this with council writer mode."
+    ],
+    "brandColor": "#2563EB"
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codex-council": {
+      "title": "Codex Council",
+      "description": "Local durable blackboard for Codex Council subagent workflows.",
+      "cwd": ".",
+      "command": "python3",
+      "args": [
+        "./mcp/council_server.py",
+        "--stdio"
+      ]
+    }
+  }
+}
