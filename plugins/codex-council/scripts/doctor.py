@@ -75,6 +75,21 @@ def validate_skills() -> None:
         check("description:" in text, f"{skill} has description")
 
 
+def validate_subagent_discovery_contract() -> None:
+    prompts = (ROOT / "docs" / "subagent-prompts.md").read_text(encoding="utf-8")
+    protocol = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
+    troubleshooting = (ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+    council_run = (ROOT / "skills" / "council-run" / "SKILL.md").read_text(encoding="utf-8")
+    combined = "\n".join([prompts, protocol, troubleshooting, council_run])
+
+    check('tool_search with query "codex-council"' in prompts, "subagent prompts require codex-council tool_search")
+    check("mcp__codex_council" in prompts, "subagent prompts name typed Council MCP tools")
+    check("BLOCKED" in prompts, "subagent prompts block when typed tools are unavailable")
+    check("direct stdio" in combined, "docs explicitly reject stdio fallback for normal council work")
+    check("stdio fallback" in council_run, "council-run forbids stdio fallback")
+    check("fresh Codex thread" in troubleshooting, "troubleshooting covers stale thread refresh")
+
+
 def validate_clean_tree() -> None:
     banned = []
     for path in MARKETPLACE_ROOT.rglob("*"):
@@ -96,6 +111,7 @@ def main() -> int:
     validate_mcp_config()
     validate_marketplace()
     validate_skills()
+    validate_subagent_discovery_contract()
     validate_clean_tree()
     run([sys.executable, "mcp/council_server.py", "--self-test"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])

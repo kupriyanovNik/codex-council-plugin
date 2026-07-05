@@ -75,7 +75,7 @@ plugins/codex-council/
   .mcp.json                   MCP server registration
   mcp/council_server.py       local MCP server
   skills/                     Codex skills for discussion, review, design, write mode
-  docs/                       protocol, roles, architecture, storage policy
+  docs/                       protocol, roles, architecture, storage, troubleshooting
   tests/                      server tests
 ```
 

@@ -16,6 +16,7 @@ Read these files before starting a council:
 - `../../docs/roles.md`
 - `../../docs/storage-policy.md`
 - `../../docs/subagent-prompts.md`
+- `../../docs/troubleshooting.md`
 
 ## Workflow
 
@@ -32,13 +33,21 @@ Read these files before starting a council:
 2. Call `create_session` with the current session workspace root, objective,
    mode, and `allow_writes`.
 3. Spawn fresh subagents for each role using the relevant template from
-   `subagent-prompts.md`.
-4. Require each subagent to register through `register_agent`.
-5. Register the parent as `chair` before it writes to MCP directly.
-6. Run independent, cross-review, evidence, and decision rounds through MCP
+   `subagent-prompts.md`. Include the installed Codex Council plugin mention in
+   the subagent input when the host supports structured mentions.
+4. Require each subagent to call `tool_search` with query `codex-council` as
+   its first tool step, then use the typed `mcp__codex_council.*` tools. If a
+   subagent cannot discover those typed tools, treat it as blocked and do not
+   let it fall back to shell, Python, sqlite3, or direct stdio calls. For local
+   plugin development, this commonly means the current thread predates a plugin
+   reinstall; start a fresh thread before retrying.
+5. Require each subagent to register through
+   `mcp__codex_council.register_agent`.
+6. Register the parent as `chair` before it writes to MCP directly.
+7. Run independent, cross-review, evidence, and decision rounds through MCP
    messages and artifacts.
-7. Export a transcript with `export_transcript`.
-8. Return a concise final synthesis with transcript path and any remaining
+8. Export a transcript with `export_transcript`.
+9. Return a concise final synthesis with transcript path and any remaining
    uncertainty.
 
 ## Parent Rules
@@ -46,4 +55,5 @@ Read these files before starting a council:
 - Keep the parent context small. Store long content as artifacts.
 - Use subagent final responses only as status beacons.
 - Treat MCP state as the source of truth.
+- Do not instruct subagents to use stdio fallback for normal council work.
 - Do not spawn Writer in read-only discussion, review, or design tasks.

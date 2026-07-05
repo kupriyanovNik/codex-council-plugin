@@ -6,6 +6,15 @@ Use this protocol whenever a Codex Council skill starts a multi-agent session.
 
 - Use the MCP blackboard as the transport. Do not move long agent output through
   the parent conversation.
+- Subagents must discover the typed Council MCP tools before using the
+  blackboard. Their first tool step should be `tool_search` with query
+  `codex-council`, then they must call `mcp__codex_council.*` tools directly.
+- Do not use shell, Python, sqlite3, or direct stdio calls to
+  `mcp/council_server.py` as the normal subagent transport. If typed MCP tools
+  cannot be discovered, the subagent should return `BLOCKED` with the discovery
+  error instead of falling back to stdio. Direct stdio is reserved for explicit
+  diagnostics. See `troubleshooting.md` for stale thread/tool-index symptoms
+  after plugin reinstall.
 - Keep messages short. Put long analysis in artifacts and reference the
   artifact id.
 - Acknowledge messages after reading them.
@@ -34,11 +43,16 @@ Then spawn the role agents and give each agent:
 - the session id
 - its role name
 - the allowed capabilities
-- a reminder to use the MCP tools rather than parent-relayed content
+- a reminder to call `tool_search` for `codex-council` and then use typed
+  `mcp__codex_council.*` tools rather than parent-relayed content
+- a reminder to report `BLOCKED` if typed tools are unavailable, not to use
+  shell or stdio fallback
 
 Register `chair` when the parent will write to MCP directly.
 
 Use `subagent-prompts.md` for dispatch templates.
+Use `troubleshooting.md` when a subagent cannot discover
+`mcp__codex_council.*` after `tool_search`.
 
 ## Rounds
 

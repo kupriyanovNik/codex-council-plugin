@@ -1,6 +1,6 @@
 {
   "name": "codex-council",
-  "version": "0.1.1+codex.20260705181405",
+  "version": "0.1.1+codex.20260705150406",
   "description": "Local Codex Council workflows for role-based discussion, review, design, and optional file changes.",
   "author": {
     "name": "Local developer"
