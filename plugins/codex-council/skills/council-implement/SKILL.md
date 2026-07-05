@@ -1,6 +1,6 @@
 ---
 name: council-implement
-description: Run a write-capable Codex Council implementation workflow with a Writer role, task leases, review roles, and MCP-backed artifacts. Use only when the user explicitly asks Codex to make code changes or says edits are allowed.
+description: Run a write-capable Codex Council workflow with a Writer role, task leases, review roles, and MCP-backed artifacts. Use only when the user explicitly asks Codex to change files, such as code, docs, configs, plans, or generated artifacts.
 ---
 
 # Council Implement
@@ -20,9 +20,9 @@ Read `../../docs/protocol.md`, `../../docs/roles.md`, and
 4. Require Writer to call `claim_task` before editing.
 5. Do not run parallel Writers on overlapping files.
 6. Require Writer to post a completion artifact with changed files and
-   verification commands.
+   verification commands or checks.
 7. Require Reviewer and Verifier to inspect the result before final synthesis.
-8. Export transcript and report changed files, tests run, and open risks.
+8. Export transcript and report changed files, checks run, and open risks.
 
 ## Safety Rules
 

@@ -6,15 +6,16 @@ the execution environment; the plugin adds durable coordination primitives.
 
 ## Components
 
-- Skills define the workflows users invoke: review, design, implementation, and
-  the general council runner.
+- Skills define the workflows users invoke: general discussion, review, design,
+  write-capable work, and the general council runner.
 - The MCP server is the durable coordination layer. Agents use it to exchange
   short messages, store long artifacts, claim tasks, append claims, and vote on
   decisions.
 - SQLite stores structured session state in the target workspace under
   `.codex-council/council.sqlite`.
-- Artifact files store long Markdown, logs, code review notes, test evidence,
-  patches, and transcripts under `.codex-council/artifacts/`.
+- Artifact files store long Markdown, source notes, review notes, logs, test
+  evidence when relevant, patches when writing, and transcripts under
+  `.codex-council/artifacts/`.
 
 ## Data Flow
 
@@ -40,4 +41,3 @@ stdlib and SQLite; no package install step is required.
 The current production-local backend is SQLite. A future team version can keep
 the same tool contract and replace the storage adapter with Postgres and object
 storage.
-

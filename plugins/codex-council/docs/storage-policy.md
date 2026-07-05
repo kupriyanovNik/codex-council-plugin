@@ -9,8 +9,8 @@ Default storage is workspace-local:
   exports/<session-id>-transcript.md
 ```
 
-The plugin installation directory stores code and skill instructions only. It
-does not store council sessions by default.
+The plugin installation directory stores plugin code and skill instructions
+only. It does not store council sessions by default.
 
 ## Retention
 
@@ -19,13 +19,13 @@ manual cleanup if the result needs to be preserved outside the workspace.
 
 ## Privacy
 
-Artifacts may contain source code, logs, design notes, or review findings. Treat
-`.codex-council/` as project data. Do not commit it unless a project explicitly
-wants council records in version control.
+Artifacts may contain source material, source code, logs, design notes, review
+findings, reasoning drafts, or local context. Treat `.codex-council/` as project
+data. Do not commit it unless a project explicitly wants council records in
+version control.
 
 ## Portability
 
 SQLite is the local production backend. The MCP tool contract intentionally uses
 workspace root and session id parameters so a future remote backend can keep the
 same agent-facing workflow.
-

@@ -23,7 +23,7 @@ INSTRUCTIONS = """Codex Council is a local blackboard for Codex subagents.
 Use create_session first. Agents must register, exchange short messages through
 post_message/list_messages, store long content as artifacts, ack messages after
 reading, and use tasks/leases for write-capable work. Writer roles must only be
-used when the user explicitly authorized code changes."""
+used when the user explicitly authorized file changes."""
 
 
 JsonDict = dict[str, Any]

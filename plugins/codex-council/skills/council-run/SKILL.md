@@ -1,6 +1,6 @@
 ---
 name: council-run
-description: Run a Codex Council workflow with role-based subagents using the bundled local MCP blackboard. Use when the user asks for a council, mesh, multi-agent discussion, subagent debate, role-based review/design/implementation, or an llm-council-like workflow inside Codex.
+description: Run a generic Codex Council workflow with role-based subagents using the bundled local MCP blackboard. Use when the user asks for a council, mesh, multi-agent discussion, subagent debate, role-based review, design, decision support, research-style analysis, optional implementation, or an llm-council-like workflow inside Codex.
 ---
 
 # Council Run
@@ -20,12 +20,17 @@ Read these files before starting a council:
 ## Workflow
 
 1. Select mode:
-   - `light`: Architect and Skeptic.
-   - `standard`: Architect, Skeptic, Verifier.
-   - `deep`: Architect, Skeptic, Verifier, Reviewer, Security.
-   - Add Writer only when the user explicitly authorized edits.
-2. Call `create_session` with the current workspace root, objective, mode, and
-   `allow_writes`.
+   - `light`: Architect and Skeptic for a quick second opinion.
+   - `standard`: Architect, Skeptic, Verifier for most discussions.
+   - `deep`: Architect, Skeptic, Verifier, Reviewer. Add Security only when
+     safety, privacy, permission, or sensitive-data risks are relevant.
+   - `review`: Reviewer, Skeptic, Verifier for read-only critique.
+   - `design`: Architect, Skeptic, Verifier for plans, systems, product
+     choices, protocols, or implementation strategy.
+   - `implement`: Writer plus review roles, only when the user explicitly
+     authorized file changes.
+2. Call `create_session` with the current session workspace root, objective,
+   mode, and `allow_writes`.
 3. Spawn fresh subagents for each role using the relevant template from
    `subagent-prompts.md`.
 4. Require each subagent to register through `register_agent`.
@@ -41,4 +46,4 @@ Read these files before starting a council:
 - Keep the parent context small. Store long content as artifacts.
 - Use subagent final responses only as status beacons.
 - Treat MCP state as the source of truth.
-- Do not spawn Writer in read-only review or design tasks.
+- Do not spawn Writer in read-only discussion, review, or design tasks.

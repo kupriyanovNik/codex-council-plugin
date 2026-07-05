@@ -15,13 +15,15 @@ Use this protocol whenever a Codex Council skill starts a multi-agent session.
 - Use claims for evidence-backed assertions.
 - Use decisions and votes for final recommendations.
 - Use tasks and leases for write-capable work.
-- Do not enable writer roles unless the user explicitly authorized code changes.
+- Do not enable writer roles unless the user explicitly authorized file changes.
 
 ## Session Bootstrap
 
 Call `create_session` with:
 
-- `workspace_root`: absolute path to the target repo or project.
+- `workspace_root`: absolute path to the session workspace. For code tasks this
+  is usually the target repo. For conceptual tasks it is the local folder where
+  council artifacts should be stored.
 - `objective`: the user's task.
 - `mode`: `light`, `standard`, `deep`, `review`, `design`, or `implement`.
 - `allow_writes`: `true` only after explicit user permission to edit files.
@@ -52,8 +54,9 @@ messages, and post challenges or agreements.
 
 ### Round 3: Evidence Pass
 
-Evidence-oriented roles check files, tests, docs, or local behavior and append
-claims with artifact references.
+Evidence-oriented roles check the task context, provided material, files, docs,
+commands, tests, or local behavior when those sources apply. They append claims
+with artifact references and state limits when the session is mostly conceptual.
 
 ### Round 4: Decision
 
@@ -77,6 +80,8 @@ Use topics:
 - `proposal`
 - `challenge`
 - `evidence`
+- `discussion`
+- `option`
 - `decision`
 - `implementation`
 - `test`
@@ -91,4 +96,4 @@ Writer mode is opt-in. It requires:
 4. A successful `claim_task` result before editing.
 5. A completion artifact describing changed files and verification.
 
-Do not run parallel writers on overlapping files.
+Do not run parallel writers on overlapping files or artifacts.
