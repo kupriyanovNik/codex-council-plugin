@@ -26,3 +26,17 @@ Fix:
 
 Direct stdio calls are acceptable only for explicit diagnostics of the MCP
 server itself. They are not the production transport for subagent councils.
+
+## Legacy sessions after token-gated writer mode
+
+Plugin versions before token-gated writer mode created sessions without a
+registration token. If an old active `implement` session must be continued,
+call `rotate_registration_token` for that session. For legacy sessions with no
+stored token hash, this returns a new recovery `registration_token`.
+
+For sessions that already have a token hash, `rotate_registration_token`
+requires the current registration token before it returns a replacement.
+
+Keep the returned token private in the parent. Do not pass it to subagents or
+post it in Council messages, artifacts, transcripts, commits, or final
+user-facing summaries.

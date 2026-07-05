@@ -25,6 +25,11 @@ Use this protocol whenever a Codex Council skill starts a multi-agent session.
 - Use decisions and votes for final recommendations.
 - Use tasks and leases for write-capable work.
 - Do not enable writer roles unless the user explicitly authorized file changes.
+- Keep registration and agent tokens out of messages, artifacts, transcripts,
+  and final user-facing summaries. Pass them only in direct tool arguments.
+- Treat `to_agents` as inbox routing, not a secrecy boundary. A council session
+  is a shared local blackboard; do not put role-confidential secrets into
+  session artifacts or messages.
 
 ## Session Bootstrap
 
@@ -37,12 +42,45 @@ Call `create_session` with:
 - `mode`: `light`, `standard`, `deep`, `review`, `design`, or `implement`.
 - `allow_writes`: `true` only after explicit user permission to edit files.
 
+The response includes a `registration_token`. The parent must keep it private
+and use it only when the parent itself registers privileged actors before
+dispatching them:
+
+- `chair`, when the parent will create write tasks directly
+- `writer`, when a Writer subagent is authorized for implementation
+- agents explicitly granted a `write` capability
+
+Privileged `register_agent` calls return an `agent_token`. The holder must pass
+that token to `create_task`, `claim_task`, and `complete_task` when acting as the
+privileged task creator or writer.
+
+If an agent has an `agent_token`, pass it on every mutating MCP call made as
+that identity, including `heartbeat_agent`, `post_message`, `ack_message`,
+`put_artifact`, `append_claim`, `propose_decision`, and `vote_decision`.
+Read-only or non-privileged agents without an issued token continue to omit the
+field.
+
+Repeated `register_agent` calls for an already tokenized privileged identity
+also require that identity's `agent_token`; otherwise use `heartbeat_agent`.
+
+Do not pass the session-wide `registration_token` to subagents. For privileged
+subagents, the parent registers the intended `agent_id`, role, and capabilities,
+then passes only that agent's private `agent_token` in the direct subagent
+prompt. An existing `agent_id` cannot change role or capabilities in place;
+register a new `agent_id` for a changed identity.
+
+If an old session predates registration tokens, use `rotate_registration_token`
+once to recover a private registration token before continuing write-capable
+work.
+
 Then spawn the role agents and give each agent:
 
 - the workspace root
 - the session id
 - its role name
 - the allowed capabilities
+- a private `agent_token` only if the parent pre-registered that privileged
+  role (`chair`, `writer`, or explicit `write` capability)
 - a reminder to call `tool_search` for `codex-council` and then use typed
   `mcp__codex_council.*` tools rather than parent-relayed content
 - a reminder to report `BLOCKED` if typed tools are unavailable, not to use
@@ -77,6 +115,9 @@ with artifact references and state limits when the session is mostly conceptual.
 The chair or parent proposes a decision. Agents vote when their role has enough
 evidence. The parent exports the transcript and writes the user-facing synthesis.
 
+`close_session` requires either the private session `registration_token` or a
+registered Chair identity plus the Chair `agent_token`.
+
 ## Message Conventions
 
 Use stable agent ids:
@@ -107,7 +148,10 @@ Writer mode is opt-in. It requires:
 1. A user request that explicitly permits edits.
 2. `allow_writes: true` in the session.
 3. A task created with `create_task`.
-4. A successful `claim_task` result before editing.
-5. A completion artifact describing changed files and verification.
+4. A registered `Writer` role or an agent explicitly registered with a `write`
+   capability before claiming or completing a write task.
+5. A private `agent_token` from privileged registration.
+6. A successful `claim_task` result before editing.
+7. A completion artifact describing changed files and verification.
 
 Do not run parallel writers on overlapping files or artifacts.

@@ -14,20 +14,24 @@ the execution environment; the plugin adds durable coordination primitives.
 - SQLite stores structured session state in the target workspace under
   `.codex-council/council.sqlite`.
 - Artifact files store long Markdown, source notes, review notes, logs, test
-  evidence when relevant, patches when writing, and transcripts under
+  evidence when relevant, and patches when writing under
   `.codex-council/artifacts/`.
+- Exported transcripts are written under `.codex-council/exports/`.
 
 ## Data Flow
 
 1. A council skill creates a session through `create_session`.
-2. The parent agent spawns role-specific subagents and gives each one the
-   workspace root, session id, role, mode, and protocol summary.
-3. Each subagent registers itself through `register_agent`.
-4. Agents use `post_message`, `list_messages`, `ack_message`, and artifact tools
+2. The parent pre-registers any privileged role, such as Chair or Writer, with
+   the session registration token and keeps that token private.
+3. The parent spawns role-specific subagents and gives each one the workspace
+   root, session id, role, mode, and protocol summary. Privileged subagents
+   receive only their own per-agent `agent_token`.
+4. Non-privileged subagents register themselves through `register_agent`.
+5. Agents use `post_message`, `list_messages`, `ack_message`, and artifact tools
    instead of relaying large content through the parent prompt.
-5. Claims and decisions are written to the MCP server so the final answer can be
+6. Claims and decisions are written to the MCP server so the final answer can be
    reconstructed from durable evidence.
-6. The parent exports a Markdown transcript with `export_transcript` before
+7. The parent exports a Markdown transcript with `export_transcript` before
    closing the session.
 
 ## Locality

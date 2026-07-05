@@ -7,16 +7,27 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import re
+import secrets
 import sqlite3
 import sys
 import traceback
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SERVER_NAME = "codex-council"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.1.1"
 PROTOCOL_VERSION = "2024-11-05"
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PRIVILEGED_ROLES = {"chair", "writer"}
+WRITE_CAPABILITIES = {"write", "writer"}
+SQLITE_STATE_FILES = (
+    "council.sqlite",
+    "council.sqlite-wal",
+    "council.sqlite-shm",
+    "council.sqlite-journal",
+)
 
 
 INSTRUCTIONS = """Codex Council is a local blackboard for Codex subagents.
@@ -41,6 +52,14 @@ def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:16]}"
 
 
+def new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def as_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -56,6 +75,14 @@ def require_string(args: JsonDict, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} must be a non-empty string")
     return value.strip()
+
+
+def validate_identifier(value: str, key: str) -> str:
+    if not IDENTIFIER_RE.fullmatch(value) or ".." in value:
+        raise ValueError(
+            f"{key} must be a simple identifier using letters, numbers, '.', '_', or '-'"
+        )
+    return value
 
 
 def optional_string(args: JsonDict, key: str, default: str = "") -> str:
@@ -98,35 +125,81 @@ def workspace_root(args: JsonDict) -> pathlib.Path:
     return root
 
 
+def ensure_real_directory(path: pathlib.Path, label: str, *, within: pathlib.Path | None = None) -> pathlib.Path:
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {path}")
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"{label} must be a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    resolved = path.resolve()
+    if within is not None and resolved != within.resolve() and not resolved.is_relative_to(within.resolve()):
+        raise ValueError(f"{label} escapes expected directory: {path}")
+    return path
+
+
 def council_root(root: pathlib.Path) -> pathlib.Path:
     path = root / ".codex-council"
-    path.mkdir(parents=True, exist_ok=True)
+    return ensure_real_directory(path, "council directory", within=root)
+
+
+def safe_child_path(parent: pathlib.Path, child: str, label: str) -> pathlib.Path:
+    base = parent.resolve()
+    candidate = base / child
+    if candidate.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {child}")
+    path = candidate.resolve()
+    if path != base and not path.is_relative_to(base):
+        raise ValueError(f"{label} escapes expected directory: {child}")
     return path
+
+
+def ensure_safe_state_file(parent: pathlib.Path, filename: str, label: str) -> pathlib.Path:
+    base = parent.resolve()
+    candidate = parent / filename
+    if candidate.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {candidate}")
+    if candidate.exists() and not candidate.is_file():
+        raise ValueError(f"{label} must be a file: {candidate}")
+    resolved = candidate.resolve()
+    if resolved != base and not resolved.is_relative_to(base):
+        raise ValueError(f"{label} escapes expected directory: {candidate}")
+    return candidate
 
 
 def db_path(root: pathlib.Path) -> pathlib.Path:
-    return council_root(root) / "council.sqlite"
+    council = council_root(root)
+    for filename in SQLITE_STATE_FILES:
+        ensure_safe_state_file(council, filename, "SQLite state file")
+    return council / "council.sqlite"
 
 
 def artifact_root(root: pathlib.Path, session_id: str) -> pathlib.Path:
-    path = council_root(root) / "artifacts" / session_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    validate_identifier(session_id, "session_id")
+    artifacts = ensure_real_directory(council_root(root) / "artifacts", "artifact root", within=council_root(root))
+    path = safe_child_path(artifacts, session_id, "session_id")
+    return ensure_real_directory(path, "session artifact directory", within=artifacts)
 
 
 def export_root(root: pathlib.Path) -> pathlib.Path:
     path = council_root(root) / "exports"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_real_directory(path, "export root", within=council_root(root))
 
 
-def connect(root: pathlib.Path) -> sqlite3.Connection:
+@contextlib.contextmanager
+def connect(root: pathlib.Path) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(db_path(root))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    ensure_schema(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        ensure_schema(conn)
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -138,6 +211,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           objective TEXT NOT NULL,
           mode TEXT NOT NULL,
           allow_writes INTEGER NOT NULL DEFAULT 0,
+          registration_token_hash TEXT,
           status TEXT NOT NULL DEFAULT 'active',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -148,6 +222,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           agent_id TEXT NOT NULL,
           role TEXT NOT NULL,
           capabilities_json TEXT NOT NULL DEFAULT '[]',
+          agent_token_hash TEXT,
           registered_at TEXT NOT NULL,
           heartbeat_at TEXT NOT NULL,
           PRIMARY KEY (session_id, agent_id),
@@ -249,6 +324,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
     if "created_by" not in task_columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN created_by TEXT")
+    session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "registration_token_hash" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN registration_token_hash TEXT")
+    agent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(agents)").fetchall()}
+    if "agent_token_hash" not in agent_columns:
+        conn.execute("ALTER TABLE agents ADD COLUMN agent_token_hash TEXT")
 
 
 def ensure_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
@@ -270,13 +351,80 @@ def ensure_writes_allowed(session: sqlite3.Row) -> None:
         raise ValueError("write-capable tasks require implement mode")
 
 
-def ensure_agent_registered(conn: sqlite3.Connection, session_id: str, agent_id: str) -> None:
+def ensure_agent_registered(conn: sqlite3.Connection, session_id: str, agent_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT 1 FROM agents WHERE session_id = ? AND agent_id = ?",
+        "SELECT * FROM agents WHERE session_id = ? AND agent_id = ?",
         (session_id, agent_id),
     ).fetchone()
     if row is None:
         raise ValueError(f"unknown agent_id for session {session_id}: {agent_id}")
+    return row
+
+
+def token_matches(stored_hash: str | None, token: str) -> bool:
+    return bool(stored_hash and token and secrets.compare_digest(stored_hash, token_hash(token)))
+
+
+def agent_capabilities(agent: sqlite3.Row) -> set[str]:
+    return {
+        item.casefold()
+        for item in from_json(agent["capabilities_json"], [])
+        if isinstance(item, str)
+    }
+
+
+def agent_role(agent: sqlite3.Row) -> str:
+    return str(agent["role"]).strip().casefold()
+
+
+def is_privileged_registration(role: str, capabilities: list[str]) -> bool:
+    caps = {item.casefold() for item in capabilities}
+    return role.strip().casefold() in PRIVILEGED_ROLES or not caps.isdisjoint(WRITE_CAPABILITIES)
+
+
+def require_registration_token(session: sqlite3.Row, token: str) -> None:
+    if not token_matches(session["registration_token_hash"], token):
+        raise ValueError("valid registration_token is required for privileged agent registration")
+
+
+def require_agent_token(agent: sqlite3.Row, token: str) -> None:
+    if not token_matches(agent["agent_token_hash"], token):
+        raise ValueError(f"valid agent_token is required for privileged agent: {agent['agent_id']}")
+
+
+def ensure_agent_identity(
+    conn: sqlite3.Connection,
+    session_id: str,
+    agent_id: str,
+    agent_token: str = "",
+) -> sqlite3.Row:
+    agent = ensure_agent_registered(conn, session_id, agent_id)
+    if agent["agent_token_hash"]:
+        require_agent_token(agent, agent_token)
+    return agent
+
+
+def ensure_task_creator(conn: sqlite3.Connection, session_id: str, agent_id: str, agent_token: str) -> None:
+    agent = ensure_agent_registered(conn, session_id, agent_id)
+    caps = agent_capabilities(agent)
+    if agent_role(agent) not in {"chair", "writer"} and caps.isdisjoint(WRITE_CAPABILITIES):
+        raise ValueError(f"agent is not allowed to create write tasks: {agent_id}")
+    require_agent_token(agent, agent_token)
+
+
+def ensure_writer_agent(conn: sqlite3.Connection, session_id: str, agent_id: str, agent_token: str) -> None:
+    agent = ensure_agent_registered(conn, session_id, agent_id)
+    caps = agent_capabilities(agent)
+    if agent_role(agent) != "writer" and caps.isdisjoint(WRITE_CAPABILITIES):
+        raise ValueError(f"agent is not allowed to claim or complete write tasks: {agent_id}")
+    require_agent_token(agent, agent_token)
+
+
+def ensure_chair_agent(conn: sqlite3.Connection, session_id: str, agent_id: str, agent_token: str) -> None:
+    agent = ensure_agent_registered(conn, session_id, agent_id)
+    if agent_role(agent) != "chair":
+        raise ValueError(f"agent is not allowed to close sessions: {agent_id}")
+    require_agent_token(agent, agent_token)
 
 
 def ensure_target_agents_registered(conn: sqlite3.Connection, session_id: str, agent_ids: list[str]) -> None:
@@ -367,25 +515,29 @@ def tool_create_session(args: JsonDict) -> JsonDict:
     session_id = args.get("session_id") or new_id("session")
     if not isinstance(session_id, str):
         raise ValueError("session_id must be a string")
+    session_id = validate_identifier(session_id.strip(), "session_id")
+    registration_token = new_token()
     now = utc_now()
     with connect(root) as conn:
+        artifact_dir = artifact_root(root, session_id)
         conn.execute(
             """
             INSERT INTO sessions
-            (id, workspace_root, objective, mode, allow_writes, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+            (id, workspace_root, objective, mode, allow_writes, registration_token_hash,
+             status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
             """,
-            (session_id, str(root), objective, mode, int(allow_writes), now, now),
+            (session_id, str(root), objective, mode, int(allow_writes), token_hash(registration_token), now, now),
         )
-    artifact_root(root, session_id)
     return {
         "session_id": session_id,
         "workspace_root": str(root),
         "council_dir": str(council_root(root)),
         "db_path": str(db_path(root)),
-        "artifact_dir": str(artifact_root(root, session_id)),
+        "artifact_dir": str(artifact_dir),
         "allow_writes": allow_writes,
         "mode": mode,
+        "registration_token": registration_token,
     }
 
 
@@ -395,34 +547,93 @@ def tool_register_agent(args: JsonDict) -> JsonDict:
     agent_id = require_string(args, "agent_id")
     role = require_string(args, "role")
     capabilities = optional_string_list(args, "capabilities")
+    registration_token = optional_string(args, "registration_token", "")
+    existing_agent_token = optional_string(args, "agent_token", "")
+    now = utc_now()
+    agent_token: str | None = None
+    with connect(root) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = ensure_session(conn, session_id)
+        ensure_active_session(session)
+        existing = conn.execute(
+            "SELECT * FROM agents WHERE session_id = ? AND agent_id = ?",
+            (session_id, agent_id),
+        ).fetchone()
+        requested_privileged = is_privileged_registration(role, capabilities)
+        if existing is not None:
+            existing_capabilities = from_json(existing["capabilities_json"], [])
+            metadata_changed = existing["role"] != role or existing_capabilities != capabilities
+            if metadata_changed:
+                raise ValueError("agent role/capabilities are immutable; register a new agent_id")
+            elif requested_privileged and not existing["agent_token_hash"]:
+                require_registration_token(session, registration_token)
+                agent_token = new_token()
+            elif existing["agent_token_hash"]:
+                require_agent_token(existing, existing_agent_token)
+        elif requested_privileged:
+            require_registration_token(session, registration_token)
+            agent_token = new_token()
+        conn.execute(
+            """
+            INSERT INTO agents
+            (session_id, agent_id, role, capabilities_json, agent_token_hash, registered_at, heartbeat_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, agent_id) DO UPDATE SET
+              role = excluded.role,
+              capabilities_json = excluded.capabilities_json,
+              agent_token_hash = COALESCE(excluded.agent_token_hash, agents.agent_token_hash),
+              heartbeat_at = excluded.heartbeat_at
+            """,
+            (
+                session_id,
+                agent_id,
+                role,
+                as_json(capabilities),
+                token_hash(agent_token) if agent_token else None,
+                now,
+                now,
+            ),
+        )
+    result = {"registered": True, "session_id": session_id, "agent_id": agent_id, "role": role}
+    if agent_token:
+        result["agent_token"] = agent_token
+    return result
+
+
+def tool_rotate_registration_token(args: JsonDict) -> JsonDict:
+    root = workspace_root(args)
+    session_id = require_string(args, "session_id")
+    current_registration_token = optional_string(args, "current_registration_token", "")
+    rotated_token = new_token()
     now = utc_now()
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
+        existing_hash = session["registration_token_hash"]
+        if existing_hash and not token_matches(existing_hash, current_registration_token):
+            raise ValueError("valid current_registration_token is required to rotate registration token")
         conn.execute(
-            """
-            INSERT INTO agents
-            (session_id, agent_id, role, capabilities_json, registered_at, heartbeat_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, agent_id) DO UPDATE SET
-              role = excluded.role,
-              capabilities_json = excluded.capabilities_json,
-              heartbeat_at = excluded.heartbeat_at
-            """,
-            (session_id, agent_id, role, as_json(capabilities), now, now),
+            "UPDATE sessions SET registration_token_hash = ?, updated_at = ? WHERE id = ?",
+            (token_hash(rotated_token), now, session_id),
         )
-    return {"registered": True, "session_id": session_id, "agent_id": agent_id, "role": role}
+    return {
+        "session_id": session_id,
+        "registration_token": rotated_token,
+        "rotated": True,
+        "legacy_recovery": not bool(existing_hash),
+    }
 
 
 def tool_heartbeat_agent(args: JsonDict) -> JsonDict:
     root = workspace_root(args)
     session_id = require_string(args, "session_id")
     agent_id = require_string(args, "agent_id")
+    agent_token = optional_string(args, "agent_token", "")
     now = utc_now()
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, agent_id)
+        ensure_agent_identity(conn, session_id, agent_id, agent_token)
         updated = conn.execute(
             "UPDATE agents SET heartbeat_at = ? WHERE session_id = ? AND agent_id = ?",
             (now, session_id, agent_id),
@@ -436,11 +647,12 @@ def tool_put_artifact(args: JsonDict) -> JsonDict:
     title = require_string(args, "title")
     created_by = require_string(args, "created_by")
     content = require_string(args, "content")
+    agent_token = optional_string(args, "agent_token", "")
     kind = optional_string(args, "kind", "markdown")
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, created_by)
+        ensure_agent_identity(conn, session_id, created_by, agent_token)
         artifact = store_artifact(
             conn,
             root,
@@ -457,15 +669,18 @@ def tool_get_artifact(args: JsonDict) -> JsonDict:
     root = workspace_root(args)
     session_id = require_string(args, "session_id")
     artifact_id = require_string(args, "artifact_id")
+    agent_id = optional_string(args, "agent_id", "") or None
     with connect(root) as conn:
         ensure_session(conn, session_id)
+        if agent_id:
+            ensure_agent_registered(conn, session_id, agent_id)
         row = conn.execute(
             "SELECT * FROM artifacts WHERE session_id = ? AND id = ?",
             (session_id, artifact_id),
         ).fetchone()
     if row is None:
         raise ValueError(f"unknown artifact_id: {artifact_id}")
-    path = council_root(root) / row["rel_path"]
+    path = safe_child_path(council_root(root), row["rel_path"], "artifact path")
     return {
         "artifact_id": artifact_id,
         "title": row["title"],
@@ -487,10 +702,11 @@ def tool_post_message(args: JsonDict) -> JsonDict:
     requires_response = optional_bool(args, "requires_response", False)
     artifact_id = optional_string(args, "artifact_id", "") or None
     artifact_content = args.get("artifact_content")
+    agent_token = optional_string(args, "agent_token", "")
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, from_agent)
+        ensure_agent_identity(conn, session_id, from_agent, agent_token)
         ensure_target_agents_registered(conn, session_id, to_agents)
         if artifact_content is not None:
             if not isinstance(artifact_content, str):
@@ -546,6 +762,8 @@ def tool_list_messages(args: JsonDict) -> JsonDict:
     include_acked = optional_bool(args, "include_acked", False)
     with connect(root) as conn:
         ensure_session(conn, session_id)
+        if agent_filter:
+            ensure_agent_registered(conn, session_id, agent_filter)
         rows = conn.execute(
             """
             SELECT * FROM messages
@@ -590,6 +808,7 @@ def tool_ack_message(args: JsonDict) -> JsonDict:
     root = workspace_root(args)
     session_id = require_string(args, "session_id")
     agent_id = require_string(args, "agent_id")
+    agent_token = optional_string(args, "agent_token", "")
     message_id = optional_int(args, "message_id", 0)
     if message_id <= 0:
         raise ValueError("message_id must be positive")
@@ -597,7 +816,7 @@ def tool_ack_message(args: JsonDict) -> JsonDict:
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, agent_id)
+        ensure_agent_identity(conn, session_id, agent_id, agent_token)
         ensure_message_in_session(conn, session_id, message_id)
         conn.execute(
             """
@@ -615,6 +834,7 @@ def tool_create_task(args: JsonDict) -> JsonDict:
     title = require_string(args, "title")
     description = require_string(args, "description")
     created_by = require_string(args, "created_by")
+    agent_token = require_string(args, "agent_token")
     task_id = optional_string(args, "task_id", "") or new_id("task")
     artifact_id = optional_string(args, "artifact_id", "") or None
     now = utc_now()
@@ -622,7 +842,7 @@ def tool_create_task(args: JsonDict) -> JsonDict:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
         ensure_writes_allowed(session)
-        ensure_agent_registered(conn, session_id, created_by)
+        ensure_task_creator(conn, session_id, created_by, agent_token)
         ensure_artifact_in_session(conn, session_id, artifact_id)
         conn.execute(
             """
@@ -640,6 +860,7 @@ def tool_claim_task(args: JsonDict) -> JsonDict:
     session_id = require_string(args, "session_id")
     task_id = require_string(args, "task_id")
     agent_id = require_string(args, "agent_id")
+    agent_token = require_string(args, "agent_token")
     lease_seconds = optional_int(args, "lease_seconds", 900)
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
@@ -650,7 +871,7 @@ def tool_claim_task(args: JsonDict) -> JsonDict:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
         ensure_writes_allowed(session)
-        ensure_agent_registered(conn, session_id, agent_id)
+        ensure_writer_agent(conn, session_id, agent_id, agent_token)
         updated = conn.execute(
             """
             UPDATE tasks
@@ -685,6 +906,7 @@ def tool_complete_task(args: JsonDict) -> JsonDict:
     session_id = require_string(args, "session_id")
     task_id = require_string(args, "task_id")
     agent_id = require_string(args, "agent_id")
+    agent_token = require_string(args, "agent_token")
     artifact_id = optional_string(args, "artifact_id", "") or None
     if artifact_id is None:
         raise ValueError("complete_task requires artifact_id")
@@ -694,7 +916,7 @@ def tool_complete_task(args: JsonDict) -> JsonDict:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
         ensure_writes_allowed(session)
-        ensure_agent_registered(conn, session_id, agent_id)
+        ensure_writer_agent(conn, session_id, agent_id, agent_token)
         artifact = ensure_artifact_in_session(conn, session_id, artifact_id)
         if artifact is not None and artifact["created_by"] != agent_id:
             raise ValueError(f"completion artifact was created by {artifact['created_by']}, not {agent_id}")
@@ -733,13 +955,14 @@ def tool_append_claim(args: JsonDict) -> JsonDict:
     session_id = require_string(args, "session_id")
     from_agent = require_string(args, "from_agent")
     statement = require_string(args, "statement")
+    agent_token = optional_string(args, "agent_token", "")
     confidence = optional_string(args, "confidence", "medium")
     evidence_refs = optional_string_list(args, "evidence_refs")
     claim_id = optional_string(args, "claim_id", "") or new_id("claim")
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, from_agent)
+        ensure_agent_identity(conn, session_id, from_agent, agent_token)
         ensure_artifact_refs_in_session(conn, session_id, evidence_refs)
         conn.execute(
             """
@@ -757,13 +980,14 @@ def tool_propose_decision(args: JsonDict) -> JsonDict:
     session_id = require_string(args, "session_id")
     title = require_string(args, "title")
     proposed_by = require_string(args, "proposed_by")
+    agent_token = optional_string(args, "agent_token", "")
     rationale_artifact_id = optional_string(args, "rationale_artifact_id", "") or None
     decision_id = optional_string(args, "decision_id", "") or new_id("decision")
     now = utc_now()
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, proposed_by)
+        ensure_agent_identity(conn, session_id, proposed_by, agent_token)
         ensure_artifact_in_session(conn, session_id, rationale_artifact_id)
         conn.execute(
             """
@@ -781,6 +1005,7 @@ def tool_vote_decision(args: JsonDict) -> JsonDict:
     session_id = require_string(args, "session_id")
     decision_id = require_string(args, "decision_id")
     agent_id = require_string(args, "agent_id")
+    agent_token = optional_string(args, "agent_token", "")
     stance = require_string(args, "stance")
     if stance not in {"approve", "reject", "abstain", "needs-work"}:
         raise ValueError("stance must be approve, reject, abstain, or needs-work")
@@ -788,7 +1013,7 @@ def tool_vote_decision(args: JsonDict) -> JsonDict:
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
-        ensure_agent_registered(conn, session_id, agent_id)
+        ensure_agent_identity(conn, session_id, agent_id, agent_token)
         ensure_decision_in_session(conn, session_id, decision_id)
         conn.execute(
             """
@@ -835,8 +1060,10 @@ def tool_get_session_state(args: JsonDict) -> JsonDict:
                 (session_id,),
             ).fetchall()
         ]
+    session_dict = dict(session)
+    session_dict["has_registration_token"] = bool(session_dict.pop("registration_token_hash", None))
     return {
-        "session": dict(session),
+        "session": session_dict,
         "counts": counts,
         "agents": agents,
         "open_tasks": open_tasks,
@@ -903,7 +1130,8 @@ def tool_export_transcript(args: JsonDict) -> JsonDict:
         for vote in votes:
             if vote["decision_id"] == row["id"]:
                 lines.append(f"  - {vote['agent_id']}: {vote['stance']} {vote['rationale']}".rstrip())
-    path = export_root(root) / f"{session_id}-transcript.md"
+    validate_identifier(session_id, "session_id")
+    path = safe_child_path(export_root(root), f"{session_id}-transcript.md", "transcript path")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"path": str(path)}
 
@@ -912,17 +1140,26 @@ def tool_close_session(args: JsonDict) -> JsonDict:
     root = workspace_root(args)
     session_id = require_string(args, "session_id")
     status = optional_string(args, "status", "closed")
+    registration_token = optional_string(args, "registration_token", "")
+    closed_by = optional_string(args, "closed_by", "")
+    agent_token = optional_string(args, "agent_token", "")
     if status not in {"closed", "cancelled", "archived"}:
         raise ValueError("status must be closed, cancelled, or archived")
     now = utc_now()
     with connect(root) as conn:
         session = ensure_session(conn, session_id)
         ensure_active_session(session)
+        if token_matches(session["registration_token_hash"], registration_token):
+            pass
+        elif closed_by:
+            ensure_chair_agent(conn, session_id, closed_by, agent_token)
+        else:
+            raise ValueError("close_session requires registration_token or chair agent_token")
         conn.execute(
             "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
             (status, now, session_id),
         )
-    return {"session_id": session_id, "status": status, "updated_at": now}
+    return {"session_id": session_id, "status": status, "updated_at": now, "closed_by": closed_by or "registration_token"}
 
 
 def schema_object(properties: JsonDict, required: list[str]) -> JsonDict:
@@ -966,14 +1203,36 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "agent_id": S["string"],
                 "role": S["string"],
                 "capabilities": S["string_array"],
+                "registration_token": S["string"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "agent_id", "role"],
         ),
         tool_register_agent,
     ),
+    "rotate_registration_token": (
+        "Rotate or recover a session registration token. Existing tokenized sessions require the current token.",
+        schema_object(
+            {
+                "workspace_root": S["string"],
+                "session_id": S["string"],
+                "current_registration_token": S["string"],
+            },
+            ["workspace_root", "session_id"],
+        ),
+        tool_rotate_registration_token,
+    ),
     "heartbeat_agent": (
         "Update an agent heartbeat timestamp.",
-        schema_object({"workspace_root": S["string"], "session_id": S["string"], "agent_id": S["string"]}, ["workspace_root", "session_id", "agent_id"]),
+        schema_object(
+            {
+                "workspace_root": S["string"],
+                "session_id": S["string"],
+                "agent_id": S["string"],
+                "agent_token": S["string"],
+            },
+            ["workspace_root", "session_id", "agent_id"],
+        ),
         tool_heartbeat_agent,
     ),
     "post_message": (
@@ -990,6 +1249,7 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "artifact_id": S["string"],
                 "artifact_content": S["string"],
                 "requires_response": S["boolean"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "from_agent", "summary"],
         ),
@@ -1013,7 +1273,13 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
     "ack_message": (
         "Mark a message as read by an agent.",
         schema_object(
-            {"workspace_root": S["string"], "session_id": S["string"], "agent_id": S["string"], "message_id": S["integer"]},
+            {
+                "workspace_root": S["string"],
+                "session_id": S["string"],
+                "agent_id": S["string"],
+                "message_id": S["integer"],
+                "agent_token": S["string"],
+            },
             ["workspace_root", "session_id", "agent_id", "message_id"],
         ),
         tool_ack_message,
@@ -1028,6 +1294,7 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "kind": S["string"],
                 "created_by": S["string"],
                 "content": S["string"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "title", "created_by", "content"],
         ),
@@ -1035,7 +1302,15 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
     ),
     "get_artifact": (
         "Read a session artifact by id.",
-        schema_object({"workspace_root": S["string"], "session_id": S["string"], "artifact_id": S["string"]}, ["workspace_root", "session_id", "artifact_id"]),
+        schema_object(
+            {
+                "workspace_root": S["string"],
+                "session_id": S["string"],
+                "artifact_id": S["string"],
+                "agent_id": S["string"],
+            },
+            ["workspace_root", "session_id", "artifact_id"],
+        ),
         tool_get_artifact,
     ),
     "create_task": (
@@ -1048,9 +1323,10 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "title": S["string"],
                 "description": S["string"],
                 "created_by": S["string"],
+                "agent_token": S["string"],
                 "artifact_id": S["string"],
             },
-            ["workspace_root", "session_id", "title", "description", "created_by"],
+            ["workspace_root", "session_id", "title", "description", "created_by", "agent_token"],
         ),
         tool_create_task,
     ),
@@ -1062,9 +1338,10 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "session_id": S["string"],
                 "task_id": S["string"],
                 "agent_id": S["string"],
+                "agent_token": S["string"],
                 "lease_seconds": S["integer"],
             },
-            ["workspace_root", "session_id", "task_id", "agent_id"],
+            ["workspace_root", "session_id", "task_id", "agent_id", "agent_token"],
         ),
         tool_claim_task,
     ),
@@ -1076,9 +1353,10 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "session_id": S["string"],
                 "task_id": S["string"],
                 "agent_id": S["string"],
+                "agent_token": S["string"],
                 "artifact_id": S["string"],
             },
-            ["workspace_root", "session_id", "task_id", "agent_id", "artifact_id"],
+            ["workspace_root", "session_id", "task_id", "agent_id", "agent_token", "artifact_id"],
         ),
         tool_complete_task,
     ),
@@ -1093,6 +1371,7 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "statement": S["string"],
                 "confidence": S["string"],
                 "evidence_refs": S["string_array"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "from_agent", "statement"],
         ),
@@ -1108,6 +1387,7 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "title": S["string"],
                 "proposed_by": S["string"],
                 "rationale_artifact_id": S["string"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "title", "proposed_by"],
         ),
@@ -1123,6 +1403,7 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
                 "agent_id": S["string"],
                 "stance": {"type": "string", "enum": ["approve", "reject", "abstain", "needs-work"]},
                 "rationale": S["string"],
+                "agent_token": S["string"],
             },
             ["workspace_root", "session_id", "decision_id", "agent_id", "stance"],
         ),
@@ -1141,7 +1422,14 @@ TOOLS: dict[str, tuple[str, JsonDict, Callable[[JsonDict], JsonDict]]] = {
     "close_session": (
         "Close, cancel, or archive a session.",
         schema_object(
-            {"workspace_root": S["string"], "session_id": S["string"], "status": {"type": "string", "enum": ["closed", "cancelled", "archived"]}},
+            {
+                "workspace_root": S["string"],
+                "session_id": S["string"],
+                "status": {"type": "string", "enum": ["closed", "cancelled", "archived"]},
+                "registration_token": S["string"],
+                "closed_by": S["string"],
+                "agent_token": S["string"],
+            },
             ["workspace_root", "session_id"],
         ),
         tool_close_session,

@@ -12,13 +12,22 @@ Session workspace root: [ABSOLUTE_WORKSPACE_ROOT]
 Council session id: [SESSION_ID]
 Council mode: [MODE]
 Writes allowed: [true/false]
+Private agent token: [ONLY_IF_PARENT_PRE_REGISTERED_THIS_PRIVILEGED_ROLE_OTHERWISE_OMIT]
 
 Use the codex-council MCP server as the communication channel. Do not rely on
 the parent agent to relay other agents' long-form content.
 
 First tool step: call tool_search with query "codex-council" and expose the
 typed Council MCP tools. Then use the typed mcp__codex_council.* tools directly.
-Register yourself with mcp__codex_council.register_agent before work starts.
+Register yourself with mcp__codex_council.register_agent before work starts
+unless the parent explicitly says it pre-registered your privileged role and
+gave you a private agent token. Do not change the role or capabilities of an
+existing agent_id.
+If the parent gave you a private agent token, include it as `agent_token` on
+every mutating Council call that acts as your identity, including heartbeat,
+messages, acknowledgements, artifacts, claims, decisions, and task tools.
+If you call register_agent again for a pre-registered privileged identity,
+include your private agent_token.
 Exchange short messages with mcp__codex_council.post_message,
 mcp__codex_council.list_messages, and mcp__codex_council.ack_message. Store
 long analysis with mcp__codex_council.put_artifact or post_message
@@ -33,6 +42,10 @@ and report the discovery error.
 
 Do not overwrite unrelated files or artifacts. Do not edit files unless your
 role is Writer, writes are allowed, and you have claimed a task lease.
+Never post registration tokens or agent tokens in messages, artifacts, or final
+chat output.
+Do not close, cancel, or archive the Council session unless the parent assigned
+that explicitly and provided Chair credentials.
 ```
 
 ## Architect
@@ -152,16 +165,22 @@ Role: Writer
 Capabilities: read, write, verify
 
 Task:
-1. Discover typed Council tools with tool_search, then register as agent_id
-   "writer".
-2. Confirm writes_allowed is true. If false, stop with BLOCKED.
-3. Claim the assigned task with claim_task before editing.
-4. Make a small focused file or artifact change only for the leased task.
-5. Run the smallest relevant verification or review check.
-6. Store a completion artifact listing changed files or artifacts, commands or
-   checks, results, and unresolved issues.
-7. Complete the task with complete_task.
-8. Post a short implementation message.
+1. Discover typed Council tools with tool_search. The parent must have already
+   registered agent_id "writer" and provided your private agent_token directly
+   in this prompt. Do not call register_agent to mint or change privileged
+   identity.
+2. Save the provided agent_token privately. If no agent_token is provided, stop
+   with BLOCKED.
+3. Confirm writes_allowed is true. If false, stop with BLOCKED.
+4. Claim the assigned task with claim_task using the private agent_token before
+   editing.
+5. Make a small focused file or artifact change only for the leased task.
+6. Run the smallest relevant verification or review check.
+7. Store a completion artifact listing changed files or artifacts, commands or
+   checks, results, and unresolved issues. Include agent_token when storing the
+   artifact as "writer".
+8. Complete the task with complete_task using the private agent_token.
+9. Post a short implementation message using the private agent_token.
 
 Final chat response:
 STATUS: DONE or BLOCKED
